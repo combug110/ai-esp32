@@ -58,3 +58,20 @@ See the top-level [`README.md`](../README.md) for the full project layout.
 ## License
 
 MIT — see [`LICENSE`](../LICENSE).
+
+编译环境准备
+安装 ESP-IDF：https://docs.espressif.com/projects/esp-idf/zh_CN/latest/esp32/get-started/index.html
+esp-idf版本：v5.5.4及以上
+编译
+idf.py fullclean
+idf.py set-target esp32s3
+idf.py menuconfig
+idf.py build
+烧录
+idf.py -p COMx flash monitor
+配网
+1. 触发配网：设备首次启动且没有已保存的 Wi‑Fi 时会自动进入配网。
+2. 手机端操作：打开 blufi app（或其他 BluFi 客户端），搜索并连接设备，可以选择是否加密，按提示输入 Wi‑Fi SSID/密码并发送。
+3. 观察结果：
+    - 成功：BluFi 报告连接成功，设备自动连接 Wi‑Fi。
+    - 失败：BluFi 返回失败状态，可重新发送或检查路由器。
