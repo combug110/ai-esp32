@@ -421,8 +421,7 @@ void Application::CheckNewVersion() {
 
     auto& board = Board::GetInstance();
     while (true) {
-        auto display = board.GetDisplay();
-#if 0        
+        auto display = board.GetDisplay();      
         display->SetStatus(Lang::Strings::CHECKING_NEW_VERSION);
 
         esp_err_t err = ota_->CheckVersion();
@@ -461,7 +460,6 @@ void Application::CheckNewVersion() {
             }
             // If upgrade failed, continue to normal operation
         }
-#endif
         // No new version, mark the current version as valid
         ota_->MarkCurrentVersionValid();
         if (!ota_->HasActivationCode() && !ota_->HasActivationChallenge()) {
