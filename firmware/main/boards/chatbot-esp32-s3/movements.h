@@ -44,6 +44,9 @@ public:
     //-- Oscillator Trims
     void SetTrims(int right_pitch, int right_roll, int left_pitch, int left_roll, int body,
                   int head);
+    //-- Mark a servo as 360-degree continuous rotation
+    void SetServoContinuous(int servo_index, bool continuous);
+    bool IsServoContinuous(int servo_index);
 
     //-- Predetermined Motion Functions
     void MoveServos(int time, int servo_target[]);

@@ -35,6 +35,13 @@ public:
     void DisableLimiter() { diff_limit_ = 0; };
     int GetTrim() { return trim_; };
     void SetPosition(int position);
+    //-- 360-degree continuous rotation servo mode
+    void SetContinuous(bool continuous) { continuous_ = continuous; };
+    bool IsContinuous() const { return continuous_; };
+    //-- Rotation speed pulse offset from stop (degrees, 1..45)
+    void SetRotationSpeed(int speed_degree) { rotation_speed_degree_ = speed_degree; };
+    //-- Hold time per virtual degree of rotation (ms)
+    void SetRotationMsPerDegree(int ms_per_degree) { rotation_ms_per_degree_ = ms_per_degree; };
     void Stop() { stop_ = true; };
     void Play() { stop_ = false; };
     void Reset() { phase_ = 0; };
@@ -75,6 +82,11 @@ private:
 
     int diff_limit_;
     long previous_servo_command_millis_;
+
+    //-- Continuous rotation (360 servo) parameters
+    bool continuous_;
+    int rotation_speed_degree_;   //-- Pulse offset from stop while rotating
+    int rotation_ms_per_degree_;  //-- Hold duration per virtual degree
 
     ledc_channel_t ledc_channel_;
     ledc_mode_t ledc_speed_mode_;

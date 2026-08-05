@@ -11,6 +11,9 @@ extern unsigned long IRAM_ATTR millis();
 Oscillator::Oscillator(int trim) {
     trim_ = trim;
     diff_limit_ = 0;
+    continuous_ = false;
+    rotation_speed_degree_ = 30;
+    rotation_ms_per_degree_ = 12;
     is_attached_ = false;
 
     sampling_period_ = 30;
@@ -85,6 +88,9 @@ void Oscillator::Attach(int pin, bool rev) {
     previous_servo_command_millis_ = millis();
 
     is_attached_ = true;
+    if (continuous_) {
+        Write(90);  // output stop pulse immediately after attach
+    }
 }
 
 void Oscillator::Detach() {
@@ -104,16 +110,55 @@ void Oscillator::SetT(unsigned int T) {
 }
 
 void Oscillator::SetPosition(int position) {
-    Write(position);
+    if (!is_attached_)
+        return;
+
+    if (!continuous_) {
+        Write(position);
+        return;
+    }
+
+    if (position == pos_) {
+        // Already at this virtual position: do not re-trigger a rotation.
+        // This prevents unrelated actions (e.g. moving the head) from
+        // re-commanding the body's current position and spinning it again.
+        Write(90);
+        return;
+    }
+
+    // 360-degree servo: position is a rotation amount relative to the stop
+    // point (90). Rotate at a fixed speed for a duration proportional to the
+    // amount, then always return to the 90 (1.5ms) stop pulse.
+    int delta = std::max(-60, std::min(60, position - 90));
+    if (rev_)
+        delta = -delta;
+    pos_ = position;
+
+    if (delta == 0) {
+        Write(90);
+        return;
+    }
+
+    int speed_angle = (delta > 0) ? (90 + rotation_speed_degree_)
+                                  : (90 - rotation_speed_degree_);
+    int hold_ms = std::abs(delta) * rotation_ms_per_degree_;
+
+    Write(speed_angle);
+    vTaskDelay(pdMS_TO_TICKS(hold_ms));
+    Write(90);  // stop
 }
 
 void Oscillator::Refresh() {
     if (NextSample()) {
         if (!stop_) {
-            int pos = std::round(amplitude_ * std::sin(phase_ + phase0_) + offset_);
-            if (rev_)
-                pos = -pos;
-            Write(pos + 90);
+            if (amplitude_ > 0) {
+                int pos = std::round(amplitude_ * std::sin(phase_ + phase0_) + offset_);
+                if (rev_)
+                    pos = -pos;
+                Write(pos + 90);
+            }
+            // Servos with zero amplitude are not part of this oscillation and
+            // must not receive a speed pulse.
         }
 
         phase_ = phase_ + inc_;
@@ -123,6 +168,16 @@ void Oscillator::Refresh() {
 void Oscillator::Write(int position) {
     if (!is_attached_)
         return;
+
+    if (continuous_) {
+        // Continuous servo: position acts as a speed command centered on 90.
+        // Trim is intentionally ignored so the stop pulse is exactly 1.5ms.
+        int angle = std::min(std::max(position, 0), 180);
+        uint32_t duty = (uint32_t)(((angle / 180.0) * 2.0 + 0.5) * 8191 / 20.0);
+        ESP_ERROR_CHECK(ledc_set_duty(ledc_speed_mode_, ledc_channel_, duty));
+        ESP_ERROR_CHECK(ledc_update_duty(ledc_speed_mode_, ledc_channel_));
+        return;
+    }
 
     long currentMillis = millis();
     if (diff_limit_ > 0) {

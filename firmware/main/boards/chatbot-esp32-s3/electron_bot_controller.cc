@@ -106,7 +106,13 @@ private:
             case BODY:
                 return 30;
             case HEAD:
+#ifdef CONFIG_CHATBOT_SERVO_TYPE_360
+                // 360-degree servo: position is a rotation amount from the 90
+                // stop point, allow the full +/-60 range.
+                return 30;
+#else
                 return 75;
+#endif
             default:
                 return 0;
         }
@@ -121,7 +127,11 @@ private:
             case BODY:
                 return 150;
             case HEAD:
+#ifdef CONFIG_CHATBOT_SERVO_TYPE_360
+                return 150;
+#else
                 return 105;
+#endif
             default:
                 return 180;
         }
@@ -196,6 +206,12 @@ private:
 
                 ApplyServoObject(cJSON_GetObjectItem(osc_item, "a"), amplitude, 0, 90);
                 ApplyServoObject(cJSON_GetObjectItem(osc_item, "o"), center_angle, 0, 180, true);
+                for (int j = 0; j < SERVO_COUNT; j++) {
+                    if (electron_bot_.IsServoContinuous(j)) {
+                        // 360-degree servos oscillate around the 90 stop point.
+                        center_angle[j] = 90;
+                    }
+                }
                 ClampOscillationRange(amplitude, center_angle);
 
                 cJSON* phase_item = cJSON_GetObjectItem(osc_item, "ph");
@@ -373,6 +389,16 @@ public:
         electron_bot_.Init(Right_Pitch_Pin, Right_Roll_Pin, Left_Pitch_Pin, Left_Roll_Pin, Body_Pin,
                            Head_Pin);
 
+        // The Body (GPIO11) / Head (GPIO10) servo type is selected via
+        // CONFIG_CHATBOT_SERVO_TYPE_*:
+        // - 180 (default): standard position servos, absolute angles.
+        // - 360: continuous rotation servos, rotate for a duration then
+        //        auto-stop at 90 (1.5ms).
+#ifdef CONFIG_CHATBOT_SERVO_TYPE_360
+        electron_bot_.SetServoContinuous(BODY, true);
+        electron_bot_.SetServoContinuous(HEAD, true);
+#endif
+
         LoadTrimsFromNVS();
         action_queue_ = xQueueCreate(10, sizeof(ElectronBotActionParams));
 
@@ -488,7 +514,12 @@ public:
             "self.electron.servo_move",
             "单独调节 ElectronBot 任意舵机到指定绝对角度。servo_type 支持完整名 "
             "right_pitch/right_roll/left_pitch/left_roll/body/head，也支持短键 rp/rr/lp/lr/b/h；"
+#ifdef CONFIG_CHATBOT_SERVO_TYPE_360
+            "position 会按安全范围自动裁剪：rp/lp=0-180, rr=100-180, lr=0-80；"
+            "b/h 为360度连续舵机，position 表示相对停止点(90°)的旋转量(30-150)；"
+#else
             "position 会按安全范围自动裁剪：rp/lp=0-180, rr=100-180, lr=0-80, body=30-150, head=75-105；"
+#endif
             "speed 为移动时间 100-3000 毫秒。",
             PropertyList({Property("servo_type", kPropertyTypeString, "head"),
                           Property("position", kPropertyTypeInteger, 90, 0, 180),
@@ -510,7 +541,12 @@ public:
             "self.electron.servo_sequences",
             "AI 自编程动作序列。支持分段多次调用，每次发送一个短 JSON 序列并自动排队执行。"
             "舵机短键：rp=右臂pitch, rr=右臂roll, lp=左臂pitch, lr=左臂roll, b=身体旋转, h=头部。"
+#ifdef CONFIG_CHATBOT_SERVO_TYPE_360
+            "所有舵机角度都会按安全范围裁剪：rp/lp=0-180, rr=100-180, lr=0-80, b=30-150, h=30-150；"
+            "360度模式下 b/h 为连续旋转舵机，position 表示相对停止点(90°)的旋转量；"
+#else
             "所有舵机角度都会按安全范围裁剪：rp/lp=0-180, rr=100-180, lr=0-80, b=30-150, h=75-105；"
+#endif
             "振荡模式会自动限制振幅，保证中心角±振幅不越界。"
             "格式：sequence 是 JSON 字符串，顶层包含 a 动作数组，可选 d 为序列间延迟毫秒。"
             "普通动作：{\"s\":{\"rp\":120,\"h\":100},\"v\":800,\"d\":200}，s 是舵机目标角度 0-180，v 是移动时间 100-3000ms。"

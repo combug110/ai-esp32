@@ -593,6 +593,32 @@ choice BOARD_TYPE
         depends on IDF_TARGET_ESP32S3
 endchoice
 
+menu "Chatbot ESP32-S3 Servo Configuration"
+    depends on BOARD_TYPE_CHATBOT_ESP32_S3
+
+    choice CHATBOT_SERVO_TYPE
+        prompt "Servo Type (Body/Head)"
+        default CHATBOT_SERVO_TYPE_180
+        help
+            Select the servo type connected to the Body (GPIO11) and Head
+            (GPIO10) channels of the chatbot ESP32-S3 board.
+
+        config CHATBOT_SERVO_TYPE_180
+            bool "180-degree standard servos"
+            help
+                Standard position servos. Servo actions move to absolute
+                angles within the configured safe range (body: 30-150,
+                head: 75-105).
+
+        config CHATBOT_SERVO_TYPE_360
+            bool "360-degree continuous rotation servos"
+            help
+                Continuous rotation servos. Servo actions rotate for a
+                duration proportional to the requested amount and then
+                auto-stop at the 90 degree (1.5ms) stop pulse.
+    endchoice
+endmenu
+
 choice XIAOZHI_NETWORK_TYPE
     prompt "Network Type"
     depends on BOARD_TYPE_WAVESHARE_ESP32_P4_NANO

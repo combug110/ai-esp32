@@ -4,6 +4,7 @@
 #include <cmath>
 
 #include "oscillator.h"
+#include "sdkconfig.h"
 
 namespace {
 float EaseOutCubic(float t) {
@@ -20,7 +21,13 @@ int ServoMinAngle(int servo_index) {
         case BODY:
             return 30;
         case HEAD:
+#ifdef CONFIG_CHATBOT_SERVO_TYPE_360
+            // 360-degree servo: position is a rotation amount from the 90 stop
+            // point, allow the full +/-60 range.
+            return 30;
+#else
             return 75;
+#endif
         default:
             return 0;
     }
@@ -35,7 +42,11 @@ int ServoMaxAngle(int servo_index) {
         case BODY:
             return 150;
         case HEAD:
+#ifdef CONFIG_CHATBOT_SERVO_TYPE_360
+            return 150;
+#else
             return 105;
+#endif
         default:
             return 180;
     }
@@ -119,6 +130,18 @@ void Otto::SetTrims(int right_pitch, int right_roll, int left_pitch, int left_ro
     }
 }
 
+void Otto::SetServoContinuous(int servo_index, bool continuous) {
+    if (servo_index >= 0 && servo_index < SERVO_COUNT) {
+        servo_[servo_index].SetContinuous(continuous);
+    }
+}
+
+bool Otto::IsServoContinuous(int servo_index) {
+    return (servo_index >= 0 && servo_index < SERVO_COUNT)
+               ? servo_[servo_index].IsContinuous()
+               : false;
+}
+
 ///////////////////////////////////////////////////////////////////
 //-- BASIC MOTION FUNCTIONS -------------------------------------//
 ///////////////////////////////////////////////////////////////////
@@ -152,7 +175,9 @@ void Otto::MoveServos(int time, int servo_target[]) {
         float t = static_cast<float>(step) / static_cast<float>(steps);
         float eased_t = EaseOutCubic(t);
         for (int i = 0; i < SERVO_COUNT; i++) {
-            if (servo_pins_[i] != -1) {
+            // Continuous servos rotate in the final SetPosition call below,
+            // so they are skipped in the per-step interpolation.
+            if (servo_pins_[i] != -1 && !servo_[i].IsContinuous()) {
                 float interpolated = start[i] + (target[i] - start[i]) * eased_t;
                 servo_[i].SetPosition(static_cast<int>(std::round(interpolated)));
             }
@@ -193,6 +218,11 @@ void Otto::OscillateServos(int amplitude[SERVO_COUNT], int offset[SERVO_COUNT], 
     for (int i = 0; i < SERVO_COUNT; i++) {
         if (servo_pins_[i] != -1) {
             center[i] = ClampServoTarget(i, offset[i]);
+            if (servo_[i].IsContinuous()) {
+                // 360-degree servos have no absolute position; oscillation
+                // must center on the 90 stop point, otherwise they drift.
+                center[i] = 90;
+            }
             int safe_amplitude = ClampServoAmplitude(i, center[i], amplitude[i]);
             servo_[i].SetO(center[i] - 90);
             servo_[i].SetA(safe_amplitude);

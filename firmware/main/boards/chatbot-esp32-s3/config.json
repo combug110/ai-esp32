@@ -3,7 +3,15 @@
     "builds": [
         {
             "name": "chatbot-esp32-s3",
-            "sdkconfig_append": []
+            "sdkconfig_append": [
+                "CONFIG_CHATBOT_SERVO_TYPE_180=y"
+            ]
+        },
+        {
+            "name": "chatbot-esp32-s3-360",
+            "sdkconfig_append": [
+                "CONFIG_CHATBOT_SERVO_TYPE_360=y"
+            ]
         }
     ]
 }
