@@ -5,6 +5,7 @@
 #include "application.h"
 #include "button.h"
 #include "config.h"
+#include "axp2101.h"
 
 #include <esp_log.h>
 #include <esp_lcd_panel_vendor.h>
@@ -43,11 +44,22 @@ static const ili9341_lcd_init_cmd_t vendor_specific_init[] = {
 // 控制器初始化函数声明
 extern void InitializeElectronBotController();
 
+class Pmic : public Axp2101 {
+public:
+    Pmic(i2c_master_bus_handle_t i2c_bus, uint8_t addr) : Axp2101(i2c_bus, addr) {
+        // Enable battery detection so the charging state (STATUS1 bit3) is
+        // accurate, otherwise the charger may report charging without battery.
+        uint8_t value = ReadReg(0x68);
+        WriteReg(0x68, value | 0x01);
+    }
+};
+
 class QuandongS3DevBoard : public WifiBoard {
 private:
     i2c_master_bus_handle_t codec_i2c_bus_;
     Button boot_button_;
     LcdDisplay* display_ = nullptr;
+    Pmic* pmic_ = nullptr;
 
     void InitializeI2c() {
         i2c_master_bus_config_t i2c_bus_cfg = {
@@ -146,6 +158,7 @@ private:
 public:
     QuandongS3DevBoard() : boot_button_(BOOT_BUTTON_GPIO) {
         InitializeI2c();
+        pmic_ = new Pmic(codec_i2c_bus_, AXP2101_I2C_ADDR);
         InitializeSpi();
         InitializeAudioPaEnable();
         InitializeIli9341Display();
@@ -179,6 +192,19 @@ public:
     virtual Backlight* GetBacklight() override {
         static PwmBacklight backlight(DISPLAY_BACKLIGHT_PIN, DISPLAY_BACKLIGHT_OUTPUT_INVERT);
         return &backlight;
+    }
+
+    virtual bool GetBatteryLevel(int &level, bool& charging, bool& discharging) override {
+        if (pmic_ == nullptr) {
+            return false;
+        }
+        charging = pmic_->IsCharging();
+        discharging = pmic_->IsDischarging();
+        level = pmic_->GetBatteryLevel();
+        if (level < 0 || level > 100) {
+            return false;
+        }
+        return true;
     }
 };
 
