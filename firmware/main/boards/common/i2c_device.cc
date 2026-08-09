@@ -33,3 +33,22 @@ uint8_t I2cDevice::ReadReg(uint8_t reg) {
 void I2cDevice::ReadRegs(uint8_t reg, uint8_t* buffer, size_t length) {
     ESP_ERROR_CHECK(i2c_master_transmit_receive(i2c_device_, &reg, 1, buffer, length, 100));
 }
+
+bool I2cDevice::TryReadReg(uint8_t reg, uint8_t& value) {
+    esp_err_t err = i2c_master_transmit_receive(i2c_device_, &reg, 1, &value, 1, 100);
+    last_transaction_ok_ = (err == ESP_OK);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "ReadReg(0x%02x) failed: %s", reg, esp_err_to_name(err));
+    }
+    return last_transaction_ok_;
+}
+
+bool I2cDevice::TryWriteReg(uint8_t reg, uint8_t value) {
+    uint8_t buffer[2] = {reg, value};
+    esp_err_t err = i2c_master_transmit(i2c_device_, buffer, 2, 100);
+    last_transaction_ok_ = (err == ESP_OK);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "WriteReg(0x%02x) failed: %s", reg, esp_err_to_name(err));
+    }
+    return last_transaction_ok_;
+}

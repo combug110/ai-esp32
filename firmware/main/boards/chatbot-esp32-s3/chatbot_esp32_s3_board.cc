@@ -43,6 +43,7 @@ static const ili9341_lcd_init_cmd_t vendor_specific_init[] = {
 
 // 控制器初始化函数声明
 extern void InitializeElectronBotController();
+extern void ElectronBotOnEmotionChanged(const char* emotion);
 
 class Pmic : public Axp2101 {
 public:
@@ -198,13 +199,22 @@ public:
         if (pmic_ == nullptr) {
             return false;
         }
+        bool read_ok = true;
         charging = pmic_->IsCharging();
+        read_ok &= pmic_->LastTransactionOk();
         discharging = pmic_->IsDischarging();
+        read_ok &= pmic_->LastTransactionOk();
         level = pmic_->GetBatteryLevel();
-        if (level < 0 || level > 100) {
+        read_ok &= pmic_->LastTransactionOk();
+        if (!read_ok || level < 0 || level > 100) {
             return false;
         }
         return true;
+    }
+
+    // Server emotion -> servo choreography
+    void OnEmotionChanged(const char* emotion) override {
+        ElectronBotOnEmotionChanged(emotion);
     }
 };
 

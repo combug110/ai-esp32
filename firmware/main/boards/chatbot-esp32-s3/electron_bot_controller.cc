@@ -4,6 +4,7 @@
 
 #include <cJSON.h>
 #include <esp_log.h>
+#include <esp_random.h>
 
 #include <algorithm>
 #include <cmath>
@@ -37,6 +38,7 @@ private:
     TaskHandle_t action_task_handle_ = nullptr;
     QueueHandle_t action_queue_;
     bool is_action_in_progress_ = false;
+    std::string last_emotion_;
 
     enum ActionType {
         // 手部动作 1-12
@@ -385,6 +387,128 @@ private:
     }
 
 public:
+    // Emotion -> servo action choreography with random variation.
+    // Invoked by the board when a new emotion arrives from the server.
+    // Queues motion only; the on-screen emotion is handled by the UI layer.
+    void OnEmotionChanged(const std::string& emotion) {
+        if (emotion.empty() || emotion == last_emotion_) {
+            return; // Skip repeated identical emotions to avoid piling up motions
+        }
+        last_emotion_ = emotion;
+
+        // Random helpers (hardware RNG)
+        auto Pick = [](int base, int spread) -> int {
+            if (spread <= 0) return base;
+            return base - spread + (int)(esp_random() % (2 * spread + 1));
+        };
+        auto Variant = [](uint32_t n) -> uint32_t {
+            return n <= 1 ? 0 : (esp_random() % n);
+        };
+
+        if (emotion == "happy" || emotion == "love" || emotion == "star") {
+            switch (Variant(5)) {
+                case 0: // oscillate both arms
+                    QueueServoSequence("{\"a\":[{\"osc\":{\"a\":{\"rp\":15,\"lp\":15},\"o\":{\"rp\":120,\"lp\":60},\"p\":500,\"c\":4}}]}");
+                    break;
+                case 1: // wave both hands
+                    QueueAction(ACTION_HAND_BOTH_WAVE, Pick(4, 2), Pick(700, 200), 0, 0);
+                    break;
+                case 2: // raise both hands then wave
+                    QueueAction(ACTION_HAND_BOTH_UP, 1, 500, 0, 0);
+                    QueueAction(ACTION_HAND_BOTH_WAVE, Pick(3, 1), Pick(600, 150), 0, 0);
+                    break;
+                case 3: // oscillate arms with head wiggle
+                    QueueServoSequence("{\"a\":[{\"osc\":{\"a\":{\"rp\":15,\"lp\":15,\"h\":5},\"o\":{\"rp\":120,\"lp\":60,\"h\":90},\"p\":450,\"c\":3}}]}");
+                    break;
+                default: // arms open/close twice
+                    QueueServoSequence("{\"a\":[{\"s\":{\"rp\":150,\"lp\":30},\"v\":400},{\"s\":{\"rp\":120,\"lp\":60},\"v\":400},{\"s\":{\"rp\":150,\"lp\":30},\"v\":400},{\"s\":{\"rp\":120,\"lp\":60},\"v\":600}]}");
+                    break;
+            }
+        } else if (emotion == "sad" || emotion == "tired" || emotion == "sleepy") {
+            switch (Variant(5)) {
+                case 0: // bow head then return
+                    QueueServoSequence("{\"a\":[{\"s\":{\"h\":72},\"v\":900},{\"s\":{\"h\":90},\"v\":1200}]}");
+                    break;
+                case 1: // slow single nod
+                    QueueAction(ACTION_HEAD_NOD_ONCE, 1, Pick(900, 300), 0, Pick(8, 4));
+                    break;
+                case 2: // lower both hands
+                    QueueAction(ACTION_HAND_BOTH_DOWN, 1, Pick(900, 300), 0, 0);
+                    break;
+                case 3: // slow deep bow
+                    QueueServoSequence("{\"a\":[{\"s\":{\"h\":72},\"v\":1100},{\"s\":{\"h\":90},\"v\":1600}]}");
+                    break;
+                default: // bow head + lower hands combo
+                    QueueAction(ACTION_HEAD_DOWN, 1, 900, 0, 8);
+                    QueueAction(ACTION_HAND_BOTH_DOWN, 1, 900, 0, 0);
+                    break;
+            }
+        } else if (emotion == "angry") {
+            switch (Variant(5)) {
+                case 0: // body swing left/right then center
+                    QueueAction(ACTION_BODY_TURN_LEFT, 1, 600, 0, 30);
+                    QueueAction(ACTION_BODY_TURN_RIGHT, 1, 600, 0, 30);
+                    QueueAction(ACTION_BODY_TURN_CENTER, 1, 600, 0, 0);
+                    break;
+                case 1: // flap both arms
+                    QueueAction(ACTION_HAND_BOTH_FLAP, Pick(3, 1), Pick(600, 200), 0, Pick(30, 10));
+                    break;
+                case 2: // wider body swing
+                    QueueAction(ACTION_BODY_TURN_LEFT, 1, 500, 0, 40);
+                    QueueAction(ACTION_BODY_TURN_RIGHT, 1, 500, 0, 40);
+                    QueueAction(ACTION_BODY_TURN_CENTER, 1, 500, 0, 0);
+                    break;
+                case 3: // raise arms then flap
+                    QueueAction(ACTION_HAND_BOTH_UP, 1, 500, 0, 0);
+                    QueueAction(ACTION_HAND_BOTH_FLAP, Pick(3, 1), Pick(500, 150), 0, Pick(35, 10));
+                    break;
+                default: // body swing + flap combo
+                    QueueAction(ACTION_BODY_TURN_LEFT, 1, 500, 0, 30);
+                    QueueAction(ACTION_HAND_BOTH_FLAP, Pick(2, 1), Pick(500, 150), 0, Pick(30, 10));
+                    QueueAction(ACTION_BODY_TURN_RIGHT, 1, 500, 0, 30);
+                    QueueAction(ACTION_BODY_TURN_CENTER, 1, 500, 0, 0);
+                    break;
+            }
+        } else if (emotion == "surprised" || emotion == "curious") {
+            switch (Variant(5)) {
+                case 0: // arms open then back
+                    QueueServoSequence("{\"a\":[{\"s\":{\"rp\":150,\"lp\":30,\"h\":100},\"v\":600},{\"s\":{\"rp\":120,\"lp\":60,\"h\":90},\"v\":800}]}");
+                    break;
+                case 1: // quick head up then center
+                    QueueAction(ACTION_HEAD_UP, 1, 400, 0, 10);
+                    QueueAction(ACTION_HEAD_CENTER, 1, 600, 0, 0);
+                    break;
+                case 2: // quick arms open/close twice with head up
+                    QueueServoSequence("{\"a\":[{\"s\":{\"h\":100,\"rp\":150,\"lp\":30},\"v\":350},{\"s\":{\"h\":90,\"rp\":120,\"lp\":60},\"v\":350},{\"s\":{\"h\":100,\"rp\":150,\"lp\":30},\"v\":350},{\"s\":{\"h\":90,\"rp\":120,\"lp\":60},\"v\":500}]}");
+                    break;
+                case 3: // head up + body sway
+                    QueueAction(ACTION_HEAD_UP, 1, 400, 0, 12);
+                    QueueAction(ACTION_BODY_TURN_LEFT, 1, 500, 0, 20);
+                    QueueAction(ACTION_BODY_TURN_CENTER, 1, 500, 0, 0);
+                    break;
+                default: // both hands up then head up
+                    QueueAction(ACTION_HAND_BOTH_UP, 1, 500, 0, 0);
+                    QueueAction(ACTION_HEAD_UP, 1, 500, 0, 10);
+                    break;
+            }
+        } else if (emotion == "neutral") {
+            switch (Variant(3)) {
+                case 0: // return to home pose
+                    QueueAction(ACTION_HOME, 1, Pick(700, 300), 0, 0);
+                    break;
+                case 1: // subtle body sway
+                    QueueAction(ACTION_BODY_TURN_LEFT, 1, 600, 0, 20);
+                    QueueAction(ACTION_BODY_TURN_RIGHT, 1, 600, 0, 20);
+                    QueueAction(ACTION_BODY_TURN_CENTER, 1, 600, 0, 0);
+                    break;
+                default: // micro nod
+                    QueueAction(ACTION_HEAD_NOD_ONCE, 1, 700, 0, Pick(4, 2));
+                    break;
+            }
+        }
+        // Other emotions: keep current pose, only the screen emotion changes
+    }
+
     ElectronBotController() {
         electron_bot_.Init(Right_Pitch_Pin, Right_Roll_Pin, Left_Pitch_Pin, Left_Roll_Pin, Body_Pin,
                            Head_Pin);
@@ -701,6 +825,13 @@ public:
 };
 
 static ElectronBotController* g_electron_controller = nullptr;
+
+void ElectronBotOnEmotionChanged(const char* emotion) {
+    if (g_electron_controller == nullptr || emotion == nullptr) {
+        return;
+    }
+    g_electron_controller->OnEmotionChanged(emotion);
+}
 
 void InitializeElectronBotController() {
     ESP_LOGI(TAG, "=========>InitializeElectronBotController start");

@@ -82,6 +82,9 @@ public:
     virtual void SetPowerSaveLevel(PowerSaveLevel level) = 0;
     virtual std::string GetBoardJson() = 0;
     virtual std::string GetDeviceStatusJson() = 0;
+    // Called when the server sends a new emotion (expression) for the device.
+    // Default is a no-op; boards may override to react (e.g. servo motion).
+    virtual void OnEmotionChanged(const char* emotion) { (void)emotion; }
 };
 
 #define DECLARE_BOARD(BOARD_CLASS_NAME) \
