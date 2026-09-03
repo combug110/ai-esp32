@@ -19,7 +19,11 @@ int ServoMinAngle(int servo_index) {
         case LEFT_ROLL:
             return 0;
         case BODY:
+#ifdef CONFIG_CHATBOT_SERVO_TYPE_360
+            return 0; // 360: full +/-90 deg range from the 90 stop point
+#else
             return 30;
+#endif
         case HEAD:
 #ifdef CONFIG_CHATBOT_SERVO_TYPE_360
             // 360-degree servo: position is a rotation amount from the 90 stop
@@ -40,7 +44,11 @@ int ServoMaxAngle(int servo_index) {
         case LEFT_ROLL:
             return 80;
         case BODY:
+#ifdef CONFIG_CHATBOT_SERVO_TYPE_360
+            return 180; // 360: full +/-90 deg range from the 90 stop point
+#else
             return 150;
+#endif
         case HEAD:
 #ifdef CONFIG_CHATBOT_SERVO_TYPE_360
             return 150;
@@ -98,7 +106,12 @@ void Otto::Init(int right_pitch, int right_roll, int left_pitch, int left_roll, 
 void Otto::AttachServos() {
     for (int i = 0; i < SERVO_COUNT; i++) {
         if (servo_pins_[i] != -1) {
-            servo_[i].Attach(servo_pins_[i]);
+            // The head servo (360 continuous mode) is wired with reversed
+            // rotation polarity, so attach it with rev=true.
+            servo_[i].Attach(servo_pins_[i], i == HEAD);
+            // Stagger the attaches so only one servo powers/moves at a time,
+            // keeping the power-on current spike low.
+            vTaskDelay(pdMS_TO_TICKS(100));
         }
     }
 }
@@ -155,40 +168,40 @@ void Otto::MoveServos(int time, int servo_target[]) {
         target[i] = ClampServoTarget(i, servo_target[i]);
     }
 
-    if (time <= 10) {
-        for (int i = 0; i < SERVO_COUNT; i++) {
-            if (servo_pins_[i] != -1) {
-                servo_[i].SetPosition(target[i]);
-            }
-        }
-        vTaskDelay(pdMS_TO_TICKS(time));
-        return;
-    }
-
-    int start[SERVO_COUNT];
+    // Move only one servo at a time. When several servos are commanded in
+    // the same call (e.g. home on boot), run them sequentially so the peak
+    // current draw stays low enough to avoid a brownout reset.
     for (int i = 0; i < SERVO_COUNT; i++) {
-        start[i] = servo_[i].GetPosition();
-    }
-
-    int steps = std::max(1, time / 10);
-    for (int step = 1; step <= steps; step++) {
-        float t = static_cast<float>(step) / static_cast<float>(steps);
-        float eased_t = EaseOutCubic(t);
-        for (int i = 0; i < SERVO_COUNT; i++) {
-            // Continuous servos rotate in the final SetPosition call below,
-            // so they are skipped in the per-step interpolation.
-            if (servo_pins_[i] != -1 && !servo_[i].IsContinuous()) {
-                float interpolated = start[i] + (target[i] - start[i]) * eased_t;
-                servo_[i].SetPosition(static_cast<int>(std::round(interpolated)));
-            }
+        if (servo_pins_[i] == -1) {
+            continue;
         }
-        vTaskDelay(pdMS_TO_TICKS(10));
-    }
+        if (target[i] == servo_[i].GetPosition()) {
+            continue; // Already there, nothing to move.
+        }
 
-    for (int i = 0; i < SERVO_COUNT; i++) {
-        if (servo_pins_[i] != -1) {
+        if (time <= 10) {
             servo_[i].SetPosition(target[i]);
+            vTaskDelay(pdMS_TO_TICKS(time));
+            continue;
         }
+
+        // Continuous servos rotate inside the final SetPosition call below,
+        // so they are skipped in the per-step interpolation.
+        if (servo_[i].IsContinuous()) {
+            servo_[i].SetPosition(target[i]);
+            continue;
+        }
+
+        int start = servo_[i].GetPosition();
+        int steps = std::max(1, time / 10);
+        for (int step = 1; step <= steps; step++) {
+            float t = static_cast<float>(step) / static_cast<float>(steps);
+            float eased_t = EaseOutCubic(t);
+            float interpolated = start + (target[i] - start) * eased_t;
+            servo_[i].SetPosition(static_cast<int>(std::round(interpolated)));
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+        servo_[i].SetPosition(target[i]);
     }
 }
 
@@ -215,6 +228,7 @@ void Otto::GetServoPositions(int positions[]) {
 void Otto::OscillateServos(int amplitude[SERVO_COUNT], int offset[SERVO_COUNT], int period,
                            double phase_diff[SERVO_COUNT], float cycle = 1) {
     int center[SERVO_COUNT];
+    int safe_amplitude[SERVO_COUNT] = {};
     for (int i = 0; i < SERVO_COUNT; i++) {
         if (servo_pins_[i] != -1) {
             center[i] = ClampServoTarget(i, offset[i]);
@@ -223,29 +237,26 @@ void Otto::OscillateServos(int amplitude[SERVO_COUNT], int offset[SERVO_COUNT], 
                 // must center on the 90 stop point, otherwise they drift.
                 center[i] = 90;
             }
-            int safe_amplitude = ClampServoAmplitude(i, center[i], amplitude[i]);
+            safe_amplitude[i] = ClampServoAmplitude(i, center[i], amplitude[i]);
             servo_[i].SetO(center[i] - 90);
-            servo_[i].SetA(safe_amplitude);
+            servo_[i].SetA(safe_amplitude[i]);
             servo_[i].SetT(period);
             servo_[i].SetPh(phase_diff[i]);
         }
     }
 
-    double ref = millis();
-    double end_time = period * cycle + ref;
-
-    while (millis() < end_time) {
-        for (int i = 0; i < SERVO_COUNT; i++) {
-            if (servo_pins_[i] != -1) {
-                servo_[i].Refresh();
-            }
-        }
-        vTaskDelay(5);
-    }
+    // Oscillate only one servo at a time to limit the peak current draw.
     for (int i = 0; i < SERVO_COUNT; i++) {
-        if (servo_pins_[i] != -1) {
-            servo_[i].SetPosition(center[i]);
+        if (servo_pins_[i] == -1 || safe_amplitude[i] <= 0) {
+            continue;
         }
+        double ref = millis();
+        double end_time = period * cycle + ref;
+        while (millis() < end_time) {
+            servo_[i].Refresh();
+            vTaskDelay(5);
+        }
+        servo_[i].SetPosition(center[i]);
     }
     vTaskDelay(pdMS_TO_TICKS(10));
 }
@@ -273,6 +284,13 @@ void Otto::Execute(int amplitude[SERVO_COUNT], int offset[SERVO_COUNT], int peri
 ///////////////////////////////////////////////////////////////////
 void Otto::Home(bool hands_down) {
     if (is_otto_resting_ == false) {  // Go to rest position only if necessary
+        // 360 continuous servos have no absolute position; physically rotate
+        // them back to the initial (stop) point first.
+        for (int i = 0; i < SERVO_COUNT; i++) {
+            if (servo_pins_[i] != -1 && servo_[i].IsContinuous()) {
+                servo_[i].Home();
+            }
+        }
         int max_delta = 0;
         for (int i = 0; i < SERVO_COUNT; i++) {
             if (servo_pins_[i] != -1) {
@@ -506,7 +524,9 @@ void Otto::BodyAction(int action, int times, int amount, int period) {
 void Otto::HeadAction(int action, int times, int amount, int period) {
     // 限制参数范围
     times = std::max(1, std::min(10, times));
-    amount = std::max(1, std::min(15, abs(amount)));
+    // Allow bigger nods for 360 continuous servos; 180-mode servos are still
+    // clamped to their safe range by MoveServos.
+    amount = std::max(1, std::min(30, abs(amount)));
     period = std::max(300, std::min(3000, period));
 
     int current_positions[SERVO_COUNT];

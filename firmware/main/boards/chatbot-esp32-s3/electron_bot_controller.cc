@@ -106,11 +106,15 @@ private:
             case LEFT_ROLL:
                 return 0;
             case BODY:
+#ifdef CONFIG_CHATBOT_SERVO_TYPE_360
+                return 0; // 360: full +/-90 deg range from the 90 stop point
+#else
                 return 30;
+#endif
             case HEAD:
 #ifdef CONFIG_CHATBOT_SERVO_TYPE_360
                 // 360-degree servo: position is a rotation amount from the 90
-                // stop point, allow the full +/-60 range.
+                // stop point, allow the full +/-90 range.
                 return 30;
 #else
                 return 75;
@@ -127,7 +131,11 @@ private:
             case LEFT_ROLL:
                 return 80;
             case BODY:
+#ifdef CONFIG_CHATBOT_SERVO_TYPE_360
+                return 180; // 360: full +/-90 deg range from the 90 stop point
+#else
                 return 150;
+#endif
             case HEAD:
 #ifdef CONFIG_CHATBOT_SERVO_TYPE_360
                 return 150;
@@ -293,9 +301,17 @@ private:
         ElectronBotController* controller = static_cast<ElectronBotController*>(arg);
         ElectronBotActionParams params;
         controller->electron_bot_.AttachServos();
+        bool servos_attached = true;
+        const int kIdleDetachTimeoutSec = 3;
+        int idle_seconds = 0;
 
         while (true) {
             if (xQueueReceive(controller->action_queue_, &params, pdMS_TO_TICKS(1000)) == pdTRUE) {
+                if (!servos_attached) {
+                    controller->electron_bot_.AttachServos();
+                    servos_attached = true;
+                }
+                idle_seconds = 0;
                 ESP_LOGI(TAG, "执行动作: %d", params.action_type);
                 controller->is_action_in_progress_ = true;  // 开始执行动作
 
@@ -332,7 +348,22 @@ private:
                 } else if (params.action_type == ACTION_SERVO_SEQUENCE) {
                     controller->ExecuteServoSequence(params.servo_sequence_json);
                 }
+                // After the whole choreography is done (queue empty), return
+                // the body/head servos to their initial position. For 360
+                // continuous servos this physically rotates back to the stop
+                // point; for 180 servos it moves to the initial angles.
+                if (uxQueueMessagesWaiting(controller->action_queue_) == 0) {
+                    controller->electron_bot_.Home(true);
+                }
                 controller->is_action_in_progress_ = false;  // 动作执行完毕
+            } else {
+                // No action was queued in the last second.
+                idle_seconds++;
+                if (servos_attached && idle_seconds >= kIdleDetachTimeoutSec) {
+                    controller->electron_bot_.DetachServos();
+                    servos_attached = false;
+                    ESP_LOGI(TAG, "Servos detached after %d s idle", kIdleDetachTimeoutSec);
+                }
             }
             vTaskDelay(pdMS_TO_TICKS(20));
         }
@@ -407,88 +438,88 @@ public:
 
         if (emotion == "happy" || emotion == "love" || emotion == "star") {
             switch (Variant(5)) {
-                case 0: // oscillate both arms
-                    QueueServoSequence("{\"a\":[{\"osc\":{\"a\":{\"rp\":15,\"lp\":15},\"o\":{\"rp\":120,\"lp\":60},\"p\":500,\"c\":4}}]}");
+                case 0: // head wiggle
+                    QueueServoSequence("{\"a\":[{\"osc\":{\"a\":{\"h\":18},\"o\":{\"h\":90},\"p\":380,\"c\":4}}]}");
                     break;
-                case 1: // wave both hands
-                    QueueAction(ACTION_HAND_BOTH_WAVE, Pick(4, 2), Pick(700, 200), 0, 0);
+                case 1: // body sway
+                    QueueAction(ACTION_BODY_TURN_LEFT, 1, 600, 0, 30);
+                    QueueAction(ACTION_BODY_TURN_RIGHT, 1, 600, 0, 30);
+                    QueueAction(ACTION_BODY_TURN_CENTER, 1, 600, 0, 0);
                     break;
-                case 2: // raise both hands then wave
-                    QueueAction(ACTION_HAND_BOTH_UP, 1, 500, 0, 0);
-                    QueueAction(ACTION_HAND_BOTH_WAVE, Pick(3, 1), Pick(600, 150), 0, 0);
+                case 2: // quick nod
+                    QueueAction(ACTION_HEAD_NOD_ONCE, 1, Pick(700, 200), 0, Pick(15, 7));
                     break;
-                case 3: // oscillate arms with head wiggle
-                    QueueServoSequence("{\"a\":[{\"osc\":{\"a\":{\"rp\":15,\"lp\":15,\"h\":5},\"o\":{\"rp\":120,\"lp\":60,\"h\":90},\"p\":450,\"c\":3}}]}");
+                case 3: // body sway + head wiggle combo
+                    QueueAction(ACTION_BODY_TURN_LEFT, 1, 500, 0, 25);
+                    QueueServoSequence("{\"a\":[{\"osc\":{\"a\":{\"h\":15},\"o\":{\"h\":90},\"p\":380,\"c\":3}}]}");
+                    QueueAction(ACTION_BODY_TURN_CENTER, 1, 500, 0, 0);
                     break;
-                default: // arms open/close twice
-                    QueueServoSequence("{\"a\":[{\"s\":{\"rp\":150,\"lp\":30},\"v\":400},{\"s\":{\"rp\":120,\"lp\":60},\"v\":400},{\"s\":{\"rp\":150,\"lp\":30},\"v\":400},{\"s\":{\"rp\":120,\"lp\":60},\"v\":600}]}");
+                default: // bigger head wiggle
+                    QueueServoSequence("{\"a\":[{\"osc\":{\"a\":{\"h\":24},\"o\":{\"h\":90},\"p\":320,\"c\":5}}]}");
                     break;
             }
         } else if (emotion == "sad" || emotion == "tired" || emotion == "sleepy") {
             switch (Variant(5)) {
                 case 0: // bow head then return
-                    QueueServoSequence("{\"a\":[{\"s\":{\"h\":72},\"v\":900},{\"s\":{\"h\":90},\"v\":1200}]}");
+                    QueueServoSequence("{\"a\":[{\"s\":{\"h\":50},\"v\":900},{\"s\":{\"h\":90},\"v\":1200}]}");
                     break;
-                case 1: // slow single nod
-                    QueueAction(ACTION_HEAD_NOD_ONCE, 1, Pick(900, 300), 0, Pick(8, 4));
+                case 1: // slow deep bow
+                    QueueServoSequence("{\"a\":[{\"s\":{\"h\":42},\"v\":1200},{\"s\":{\"h\":90},\"v\":1600}]}");
                     break;
-                case 2: // lower both hands
-                    QueueAction(ACTION_HAND_BOTH_DOWN, 1, Pick(900, 300), 0, 0);
+                case 2: // bow twice
+                    QueueServoSequence("{\"a\":[{\"s\":{\"h\":52},\"v\":700},{\"s\":{\"h\":90},\"v\":900},{\"s\":{\"h\":52},\"v\":700},{\"s\":{\"h\":90},\"v\":900}]}");
                     break;
-                case 3: // slow deep bow
-                    QueueServoSequence("{\"a\":[{\"s\":{\"h\":72},\"v\":1100},{\"s\":{\"h\":90},\"v\":1600}]}");
+                case 3: // slow single nod
+                    QueueAction(ACTION_HEAD_NOD_ONCE, 1, Pick(900, 300), 0, Pick(16, 7));
                     break;
-                default: // bow head + lower hands combo
-                    QueueAction(ACTION_HEAD_DOWN, 1, 900, 0, 8);
-                    QueueAction(ACTION_HAND_BOTH_DOWN, 1, 900, 0, 0);
+                default: // head down hold then return
+                    QueueServoSequence("{\"a\":[{\"s\":{\"h\":48},\"v\":1000},{\"s\":{\"h\":90},\"v\":1500}]}");
                     break;
             }
         } else if (emotion == "angry") {
             switch (Variant(5)) {
                 case 0: // body swing left/right then center
-                    QueueAction(ACTION_BODY_TURN_LEFT, 1, 600, 0, 30);
-                    QueueAction(ACTION_BODY_TURN_RIGHT, 1, 600, 0, 30);
+                    QueueAction(ACTION_BODY_TURN_LEFT, 1, 600, 0, 35);
+                    QueueAction(ACTION_BODY_TURN_RIGHT, 1, 600, 0, 35);
                     QueueAction(ACTION_BODY_TURN_CENTER, 1, 600, 0, 0);
                     break;
-                case 1: // flap both arms
-                    QueueAction(ACTION_HAND_BOTH_FLAP, Pick(3, 1), Pick(600, 200), 0, Pick(30, 10));
-                    break;
-                case 2: // wider body swing
-                    QueueAction(ACTION_BODY_TURN_LEFT, 1, 500, 0, 40);
-                    QueueAction(ACTION_BODY_TURN_RIGHT, 1, 500, 0, 40);
+                case 1: // wider body swing
+                    QueueAction(ACTION_BODY_TURN_LEFT, 1, 500, 0, 50);
+                    QueueAction(ACTION_BODY_TURN_RIGHT, 1, 500, 0, 50);
                     QueueAction(ACTION_BODY_TURN_CENTER, 1, 500, 0, 0);
                     break;
-                case 3: // raise arms then flap
-                    QueueAction(ACTION_HAND_BOTH_UP, 1, 500, 0, 0);
-                    QueueAction(ACTION_HAND_BOTH_FLAP, Pick(3, 1), Pick(500, 150), 0, Pick(35, 10));
+                case 2: // head shake
+                    QueueServoSequence("{\"a\":[{\"osc\":{\"a\":{\"h\":26},\"o\":{\"h\":90},\"p\":260,\"c\":6}}]}");
                     break;
-                default: // body swing + flap combo
-                    QueueAction(ACTION_BODY_TURN_LEFT, 1, 500, 0, 30);
-                    QueueAction(ACTION_HAND_BOTH_FLAP, Pick(2, 1), Pick(500, 150), 0, Pick(30, 10));
-                    QueueAction(ACTION_BODY_TURN_RIGHT, 1, 500, 0, 30);
+                case 3: // fast head nod repeat
+                    QueueAction(ACTION_HEAD_NOD_REPEAT, Pick(3, 1), 400, 0, Pick(14, 6));
+                    break;
+                default: // body sway + head shake combo
+                    QueueAction(ACTION_BODY_TURN_LEFT, 1, 500, 0, 35);
+                    QueueServoSequence("{\"a\":[{\"osc\":{\"a\":{\"h\":20},\"o\":{\"h\":90},\"p\":280,\"c\":4}}]}");
+                    QueueAction(ACTION_BODY_TURN_RIGHT, 1, 500, 0, 35);
                     QueueAction(ACTION_BODY_TURN_CENTER, 1, 500, 0, 0);
                     break;
             }
         } else if (emotion == "surprised" || emotion == "curious") {
             switch (Variant(5)) {
-                case 0: // arms open then back
-                    QueueServoSequence("{\"a\":[{\"s\":{\"rp\":150,\"lp\":30,\"h\":100},\"v\":600},{\"s\":{\"rp\":120,\"lp\":60,\"h\":90},\"v\":800}]}");
+                case 0: // head up then back
+                    QueueServoSequence("{\"a\":[{\"s\":{\"h\":130},\"v\":400},{\"s\":{\"h\":90},\"v\":700}]}");
                     break;
-                case 1: // quick head up then center
-                    QueueAction(ACTION_HEAD_UP, 1, 400, 0, 10);
-                    QueueAction(ACTION_HEAD_CENTER, 1, 600, 0, 0);
-                    break;
-                case 2: // quick arms open/close twice with head up
-                    QueueServoSequence("{\"a\":[{\"s\":{\"h\":100,\"rp\":150,\"lp\":30},\"v\":350},{\"s\":{\"h\":90,\"rp\":120,\"lp\":60},\"v\":350},{\"s\":{\"h\":100,\"rp\":150,\"lp\":30},\"v\":350},{\"s\":{\"h\":90,\"rp\":120,\"lp\":60},\"v\":500}]}");
-                    break;
-                case 3: // head up + body sway
-                    QueueAction(ACTION_HEAD_UP, 1, 400, 0, 12);
-                    QueueAction(ACTION_BODY_TURN_LEFT, 1, 500, 0, 20);
+                case 1: // head up + body sway
+                    QueueAction(ACTION_HEAD_UP, 1, 400, 0, 15);
+                    QueueAction(ACTION_BODY_TURN_LEFT, 1, 500, 0, 22);
                     QueueAction(ACTION_BODY_TURN_CENTER, 1, 500, 0, 0);
                     break;
-                default: // both hands up then head up
-                    QueueAction(ACTION_HAND_BOTH_UP, 1, 500, 0, 0);
-                    QueueAction(ACTION_HEAD_UP, 1, 500, 0, 10);
+                case 2: // quick head up/down twice
+                    QueueServoSequence("{\"a\":[{\"osc\":{\"a\":{\"h\":22},\"o\":{\"h\":90},\"p\":260,\"c\":3}}]}");
+                    break;
+                case 3: // big head up
+                    QueueServoSequence("{\"a\":[{\"s\":{\"h\":150},\"v\":450},{\"s\":{\"h\":90},\"v\":800}]}");
+                    break;
+                default: // head up then nod
+                    QueueAction(ACTION_HEAD_UP, 1, 400, 0, 15);
+                    QueueAction(ACTION_HEAD_NOD_ONCE, 1, 600, 0, 12);
                     break;
             }
         } else if (emotion == "neutral") {
@@ -497,12 +528,12 @@ public:
                     QueueAction(ACTION_HOME, 1, Pick(700, 300), 0, 0);
                     break;
                 case 1: // subtle body sway
-                    QueueAction(ACTION_BODY_TURN_LEFT, 1, 600, 0, 20);
-                    QueueAction(ACTION_BODY_TURN_RIGHT, 1, 600, 0, 20);
+                    QueueAction(ACTION_BODY_TURN_LEFT, 1, 600, 0, 16);
+                    QueueAction(ACTION_BODY_TURN_RIGHT, 1, 600, 0, 16);
                     QueueAction(ACTION_BODY_TURN_CENTER, 1, 600, 0, 0);
                     break;
                 default: // micro nod
-                    QueueAction(ACTION_HEAD_NOD_ONCE, 1, 700, 0, Pick(4, 2));
+                    QueueAction(ACTION_HEAD_NOD_ONCE, 1, 700, 0, Pick(6, 3));
                     break;
             }
         }
@@ -521,6 +552,9 @@ public:
 #ifdef CONFIG_CHATBOT_SERVO_TYPE_360
         electron_bot_.SetServoContinuous(BODY, true);
         electron_bot_.SetServoContinuous(HEAD, true);
+        ESP_LOGI(TAG, "Servo mode: 360 continuous rotation");
+#else
+        ESP_LOGI(TAG, "Servo mode: 180 standard");
 #endif
 
         LoadTrimsFromNVS();

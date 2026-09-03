@@ -2,18 +2,25 @@
 
 #include <driver/ledc.h>
 #include <esp_timer.h>
+#include "esp_private/esp_gpio_reserve.h"
 
 #include <algorithm>
 #include <cmath>
 
 extern unsigned long IRAM_ATTR millis();
 
+static const char *TAG = "Osc";
+
 Oscillator::Oscillator(int trim) {
     trim_ = trim;
     diff_limit_ = 0;
     continuous_ = false;
-    rotation_speed_degree_ = 30;
-    rotation_ms_per_degree_ = 12;
+    // 18 -> ~1.30/1.70ms pulses: gentle rotation speed, clearly below the
+    // 1.0/2.0ms full speed while still outside the typical servo deadband.
+    rotation_speed_degree_ = 18;
+    // Keep the per-move rotation short so the body/head turns are small.
+    rotation_ms_per_degree_ = 3;
+    accumulated_deg_ = 0;
     is_attached_ = false;
 
     sampling_period_ = 30;
@@ -54,6 +61,13 @@ bool Oscillator::NextSample() {
 }
 
 void Oscillator::Attach(int pin, bool rev) {
+    // Idempotent: if we are already driving this pin, do nothing. Previously
+    // every AttachServos() call tore the channel down and re-created it with
+    // a different LEDC channel, which spammed "GPIO not usable" warnings and
+    // left old channels behind.
+    if (is_attached_ && pin_ == pin) {
+        return;
+    }
     if (is_attached_) {
         Detach();
     }
@@ -83,14 +97,17 @@ void Oscillator::Attach(int pin, bool rev) {
 
     ledc_speed_mode_ = LEDC_LOW_SPEED_MODE;
 
-    // pos_ = 90;
-    // Write(pos_);
     previous_servo_command_millis_ = millis();
 
     is_attached_ = true;
-    if (continuous_) {
-        Write(90);  // output stop pulse immediately after attach
-    }
+    // (Re)attach starts from the 90 stop point, so the virtual position
+    // resets too; otherwise repeated actions could be skipped by the
+    // "already at position" dedup after an idle detach.
+    pos_ = 90;
+    accumulated_deg_ = 0;
+    // Output the neutral 90 (1.5ms) pulse immediately after attach: with a
+    // 0% duty the servo would otherwise snap to its end stop on power-up.
+    Write(90);
 }
 
 void Oscillator::Detach() {
@@ -98,6 +115,11 @@ void Oscillator::Detach() {
         return;
 
     ESP_ERROR_CHECK(ledc_stop(ledc_speed_mode_, ledc_channel_, 0));
+    // ledc_stop() does not release the GPIO reservation made on attach, so
+    // re-attaching the same pin later would log "GPIO not usable, maybe
+    // conflict with others". Revoke it here to keep detach/reattach cycles
+    // warning-free.
+    esp_gpio_revoke(1ULL << pin_);
 
     is_attached_ = false;
 }
@@ -126,14 +148,24 @@ void Oscillator::SetPosition(int position) {
         return;
     }
 
-    // 360-degree servo: position is a rotation amount relative to the stop
-    // point (90). Rotate at a fixed speed for a duration proportional to the
-    // amount, then always return to the 90 (1.5ms) stop pulse.
-    int delta = std::max(-60, std::min(60, position - 90));
+    // 360-degree servo: the virtual position (0..180, 90 = center/stop)
+    // maps to a physical rotation tracked by accumulated_deg_. Rotate by the
+    // DIFFERENCE between the requested virtual position and the current one,
+    // so a sequence like 60 -> 90 really bows down and then returns to the
+    // center. Rotation amount is limited to +/-90 degrees total.
+    int delta = std::max(-90, std::min(90, (position - 90) - accumulated_deg_));
     if (rev_)
         delta = -delta;
     pos_ = position;
 
+    // Hard limit: the physical rotation may never leave +/-90 degrees in
+    // TOTAL from the initial (stop) position, no matter how many actions ask
+    // for the same direction. accumulated_deg_ tracks the true rotation.
+    if (delta > 0) {
+        delta = std::min(delta, 90 - accumulated_deg_);
+    } else {
+        delta = std::max(delta, -90 - accumulated_deg_);
+    }
     if (delta == 0) {
         Write(90);
         return;
@@ -143,9 +175,35 @@ void Oscillator::SetPosition(int position) {
                                   : (90 - rotation_speed_degree_);
     int hold_ms = std::abs(delta) * rotation_ms_per_degree_;
 
+    ESP_LOGI(TAG, "gpio%d ch%d rotate: pos=%d delta=%d pulse=%d hold=%dms", pin_, ledc_channel_,
+             position, delta, speed_angle, hold_ms);
     Write(speed_angle);
     vTaskDelay(pdMS_TO_TICKS(hold_ms));
     Write(90);  // stop
+    accumulated_deg_ += delta;
+}
+
+void Oscillator::Home() {
+    if (!is_attached_ || !continuous_) {
+        return;
+    }
+    if (accumulated_deg_ == 0) {
+        Write(90);
+        return;
+    }
+
+    // Rotate back by the total accumulated amount to return to the initial
+    // (stop) position. Always within +/-90 by construction.
+    int delta = -accumulated_deg_;
+    int speed_angle = (delta > 0) ? (90 + rotation_speed_degree_)
+                                  : (90 - rotation_speed_degree_);
+    int hold_ms = std::abs(delta) * rotation_ms_per_degree_;
+    ESP_LOGI(TAG, "gpio%d home: back %d deg", pin_, delta);
+    Write(speed_angle);
+    vTaskDelay(pdMS_TO_TICKS(hold_ms));
+    Write(90);  // stop
+    accumulated_deg_ = 0;
+    pos_ = 90;
 }
 
 void Oscillator::Refresh() {
