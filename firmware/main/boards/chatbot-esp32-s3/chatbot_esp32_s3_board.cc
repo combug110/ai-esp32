@@ -6,14 +6,26 @@
 #include "button.h"
 #include "config.h"
 #include "axp2101.h"
+#include "esp32_camera.h"
 
 #include <esp_log.h>
 #include <esp_lcd_panel_vendor.h>
 #include <driver/i2c_master.h>
 #include <driver/spi_common.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #include <wifi_station.h>
 
 #define TAG "QuandongS3DevBoard"
+
+// AXP2101 寄存器：摄像头三路供电相关（与 dsh/sparkbot 的 bot_hw_power.c 一致）
+#define AXP2101_REG_LDO_ONOFF0  0x90  // bit1=ALDO2, bit4=BLDO1, bit5=BLDO2
+#define AXP2101_REG_ALDO2_VOL   0x93  // 摄像头 I/O
+#define AXP2101_REG_BLDO1_VOL   0x96  // AVDD
+#define AXP2101_REG_BLDO2_VOL   0x97  // DVDD
+#define AXP2101_LDO_ALDO2       0x02
+#define AXP2101_LDO_BLDO1       0x10
+#define AXP2101_LDO_BLDO2       0x20
 
 // ILI9341 厂家自定义初始化序列
 static const ili9341_lcd_init_cmd_t vendor_specific_init[] = {
@@ -53,6 +65,46 @@ public:
         uint8_t value = ReadReg(0x68);
         WriteReg(0x68, value | 0x01);
     }
+
+    // 打开 OV2640 的三路供电。硬件与 dsh/sparkbot 相同：
+    //   ALDO2 = VDDCAM_3V3(摄像头 I/O)，BLDO1 = AVDD，BLDO2 = DVDD。
+    //
+    // 顺序必须是"先设电压，再使能"：本板冷启动时 DVDD 的电压寄存器停在
+    // 2.8V 档，而 OV2640 的 DVDD 只要 1.2V。若直接使能，模组会以错误电压
+    // 上电（可能损坏，或表现为 SCCB 探测不到 / "Detected camera not
+    // supported"）。供电没起来时会误判成排线或模组故障，所以这里一次性
+    // 把三路都配好。
+    void CameraPowerOn() {
+        SetLdoVoltage(AXP2101_REG_ALDO2_VOL, CAMERA_POWER_IO_MV);
+        SetLdoVoltage(AXP2101_REG_BLDO1_VOL, CAMERA_POWER_AVDD_MV);
+        SetLdoVoltage(AXP2101_REG_BLDO2_VOL, CAMERA_POWER_DVDD_MV);
+
+        const uint8_t need = AXP2101_LDO_ALDO2 | AXP2101_LDO_BLDO1 | AXP2101_LDO_BLDO2;
+        uint8_t onoff = ReadReg(AXP2101_REG_LDO_ONOFF0);
+        if ((onoff & need) != need) {
+            WriteReg(AXP2101_REG_LDO_ONOFF0, onoff | need);
+            // LDO 稳定需要时间；不等的话 SCCB 探测会随机失败。
+            vTaskDelay(pdMS_TO_TICKS(80));
+        }
+        ESP_LOGI(TAG, "Camera power: ALDO2=%dmV BLDO1=%dmV BLDO2=%dmV (0x90=0x%02X)",
+                 CAMERA_POWER_IO_MV, CAMERA_POWER_AVDD_MV, CAMERA_POWER_DVDD_MV,
+                 ReadReg(AXP2101_REG_LDO_ONOFF0));
+    }
+
+private:
+    // AXP2101 LDO 电压寄存器：低 5 位 N，电压 = 500 + N*100 (mV)，高 3 位保留。
+    void SetLdoVoltage(uint8_t reg, int millivolt) {
+        if (millivolt < 500 || millivolt > 3500) {
+            ESP_LOGW(TAG, "LDO %d mV out of range", millivolt);
+            return;
+        }
+        int n = (millivolt - 500) / 100;
+        uint8_t cur = ReadReg(reg);
+        uint8_t target = (uint8_t)((cur & 0xE0) | (n & 0x1F));
+        if (target != cur) {
+            WriteReg(reg, target);
+        }
+    }
 };
 
 class QuandongS3DevBoard : public WifiBoard {
@@ -61,6 +113,7 @@ private:
     Button boot_button_;
     LcdDisplay* display_ = nullptr;
     Pmic* pmic_ = nullptr;
+    Esp32Camera* camera_ = nullptr;
 
     void InitializeI2c() {
         i2c_master_bus_config_t i2c_bus_cfg = {
@@ -115,6 +168,97 @@ private:
 
    void InitializeController() { InitializeElectronBotController(); }
 
+    // 用 LEDC 在相机 XCLK 脚上持续输出 24MHz。
+    // 见 config.h / CAMERA.md：S3 上 esp32-camera 交给 LCD_CAM 产生 XCLK，
+    // 但实测 cam_clk 没有输出，传感器拿不到时钟就不响应 SCCB。
+    void StartCameraXclk() {
+        ledc_timer_config_t timer = {};
+        timer.speed_mode = LEDC_LOW_SPEED_MODE;
+        timer.duty_resolution = LEDC_TIMER_1_BIT;
+        timer.timer_num = CAMERA_LEDC_TIMER;
+        timer.freq_hz = CAMERA_XCLK_FREQ_HZ;
+        timer.clk_cfg = LEDC_AUTO_CLK;
+        ESP_ERROR_CHECK(ledc_timer_config(&timer));
+
+        ledc_channel_config_t channel = {};
+        channel.gpio_num = CAMERA_PIN_XCLK;
+        channel.speed_mode = LEDC_LOW_SPEED_MODE;
+        channel.channel = CAMERA_LEDC_CHANNEL;
+        channel.intr_type = LEDC_INTR_DISABLE;
+        channel.timer_sel = CAMERA_LEDC_TIMER;
+        channel.duty = 1;
+        channel.hpoint = 0;
+        ESP_ERROR_CHECK(ledc_channel_config(&channel));
+    }
+
+    void InitializeCamera() {
+        // 先给摄像头上电，否则 esp_camera_init 探测不到传感器。
+        if (pmic_ != nullptr) {
+            pmic_->CameraPowerOn();
+        }
+
+        // XCLK：实测 S3 上 esp32-camera 走 LCD_CAM 的 cam_clk 没有输出到
+        // XCLK 脚（传感器 SCCB 完全不响应）。这里用 LEDC 自己产生 24MHz，
+        // 并让 esp32-camera 不接管该引脚（pin_xclk = -1），XCLK 一直保持。
+        StartCameraXclk();
+        // OV2640 DVP，接线与 dsh/sparkbot 一致。
+        camera_config_t config = {};
+        config.pin_pwdn       = CAMERA_PIN_PWDN;
+        config.pin_reset      = CAMERA_PIN_RESET;
+        config.pin_xclk       = -1;  // XCLK 由 LEDC 提供，别让相机驱动接管
+        config.pin_sccb_sda   = CAMERA_PIN_SIOD;  // -1: 复用已有的 I2C0
+        config.pin_sccb_scl   = CAMERA_PIN_SIOC;
+        config.sccb_i2c_port  = CAMERA_SCCB_I2C_PORT;
+        config.pin_d0         = CAMERA_PIN_D0;
+        config.pin_d1         = CAMERA_PIN_D1;
+        config.pin_d2         = CAMERA_PIN_D2;
+        config.pin_d3         = CAMERA_PIN_D3;
+        config.pin_d4         = CAMERA_PIN_D4;
+        config.pin_d5         = CAMERA_PIN_D5;
+        config.pin_d6         = CAMERA_PIN_D6;
+        config.pin_d7         = CAMERA_PIN_D7;
+        config.pin_vsync      = CAMERA_PIN_VSYNC;
+        config.pin_href       = CAMERA_PIN_HREF;
+        config.pin_pclk       = CAMERA_PIN_PCLK;
+
+        config.xclk_freq_hz   = CAMERA_XCLK_FREQ_HZ;
+        // LEDC 资源分配（S3 只有 8 个通道）：背光占 TIMER_0/CH0，
+        // 舵机占 TIMER_1/CH1..6，所以相机 XCLK 单独用 TIMER_2/CH7。
+        config.ledc_timer     = LEDC_TIMER_2;
+        config.ledc_channel   = CAMERA_LEDC_CHANNEL;
+        config.pixel_format   = PIXFORMAT_RGB565;
+        config.frame_size     = FRAMESIZE_VGA;
+        config.jpeg_quality   = 12;   // RGB565 模式下不生效，仅 JPEG 模式使用
+        config.fb_count       = CAMERA_FB_COUNT;
+        config.fb_location    = CAMERA_FB_IN_PSRAM;
+        config.grab_mode      = CAMERA_GRAB_LATEST;
+
+        camera_ = new Esp32Camera(config);
+
+        // esp_camera_init 失败时 Esp32Camera 内部不会初始化传感器。
+        // 没插摄像头时把相机当"不存在"，避免上层注册出永远失败的工具。
+        if (esp_camera_sensor_get() == nullptr) {
+            ESP_LOGW(TAG, "Camera not detected, photo tools disabled");
+            delete camera_;
+            camera_ = nullptr;
+            return;
+        }
+
+        // 预热：上电后 AEC/AGC/AWB 是从默认值逐帧收敛的，头几帧增益拉满、
+        // 白平衡没收敛。这里先丢几帧再交给上层，避免第一次拍照发暗/偏色。
+        for (int i = 0; i < CAMERA_WARMUP_FRAMES; i++) {
+            camera_fb_t *fb = esp_camera_fb_get();
+            if (fb == nullptr) {
+                // 拿不到帧（最多等 4s）就直接放弃预热，别拖住启动。
+                ESP_LOGW(TAG, "Camera warmup aborted: no frame");
+                break;
+            }
+            esp_camera_fb_return(fb);
+            vTaskDelay(pdMS_TO_TICKS(20));
+        }
+
+    }
+
     void InitializeIli9341Display() {
         esp_lcd_panel_io_handle_t panel_io = nullptr;
         esp_lcd_panel_handle_t panel = nullptr;
@@ -165,6 +309,7 @@ public:
         InitializeIli9341Display();
         InitializeButtons();
         InitializeController();
+        InitializeCamera();
         GetBacklight()->SetBrightness(100);
     }
 
@@ -193,6 +338,10 @@ public:
     virtual Backlight* GetBacklight() override {
         static PwmBacklight backlight(DISPLAY_BACKLIGHT_PIN, DISPLAY_BACKLIGHT_OUTPUT_INVERT);
         return &backlight;
+    }
+
+    virtual Camera* GetCamera() override {
+        return camera_;
     }
 
     virtual bool GetBatteryLevel(int &level, bool& charging, bool& discharging) override {

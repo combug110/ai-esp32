@@ -82,8 +82,10 @@ void Oscillator::Attach(int pin, bool rev) {
                                       .clk_cfg = LEDC_AUTO_CLK};
     ESP_ERROR_CHECK(ledc_timer_config(&ledc_timer));
 
+    // 摄像头 XCLK 固定占用 LEDC 通道 7（见 config.h 的 CAMERA_LEDC_CHANNEL），
+    // 所以舵机只在通道 1~6 之间轮转，避免和相机抢占同一个 LEDC 通道。
     static int last_channel = 0;
-    last_channel = (last_channel + 1) % 7 + 1;
+    last_channel = (last_channel % 6) + 1;
     ledc_channel_ = (ledc_channel_t)last_channel;
 
     ledc_channel_config_t ledc_channel = {.gpio_num = pin_,
